@@ -15,7 +15,7 @@
  */
 
 import { createServer } from "http";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
 import { spawn } from "child_process";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -161,12 +161,15 @@ function launchPaperclip() {
   // Build a minimal config.json in PAPERCLIP_HOME so the CLI doesn't
   // try to run interactive onboarding (which needs a TTY).
   const configPath = join(PAPERCLIP_HOME, "config.json");
+  // Always regenerate config to pick up fixes
+  if (existsSync(configPath)) unlinkSync(configPath);
   if (!existsSync(configPath)) {
     const config = {
       $meta: {
         version: 1,
         createdAt: new Date().toISOString(),
-        source: "railway-wrapper",
+        updatedAt: new Date().toISOString(),   // ← add this
+        source: "onboard",                      // ← change from "railway-wrapper" to "onboard"
       },
       database: {
         provider: "postgres",
