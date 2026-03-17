@@ -189,15 +189,17 @@ function launchPaperclip() {
   process.env.HOST = process.env.HOST || "0.0.0.0";
   process.env.NODE_ENV = process.env.NODE_ENV || "production";
 
-  // Use paperclipai run --yes to skip interactive prompts
+  // Launch paperclipai run. No extra flags needed — the CLI skips interactive
+  // onboarding automatically when PAPERCLIP_CONFIG points to an existing file.
   const cli = spawn(
     "node",
-    ["node_modules/.bin/paperclipai", "run", "--yes", "--no-onboard"],
+    ["node_modules/.bin/paperclipai", "run"],
     {
       stdio: "inherit",
       env: {
         ...process.env,
         PAPERCLIP_CONFIG: configPath,
+        PAPERCLIP_HOME: PAPERCLIP_HOME,
       },
     }
   );
