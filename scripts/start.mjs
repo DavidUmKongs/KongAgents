@@ -887,36 +887,41 @@ function startServer() {
       }
 
       void (async () => {
-        let parsed = {};
         try {
-          const bodyText = await readRequestBody(req);
-          parsed = bodyText ? JSON.parse(bodyText) : {};
-        } catch (_) {
-          writeJson(res, 400, {
-            ok: false,
-            code: "invalid_request",
-            error: "Could not read the setup password payload.",
-          });
-          return;
-        }
+          let parsed = {};
+          try {
+            const bodyText = await readRequestBody(req);
+            parsed = bodyText ? JSON.parse(bodyText) : {};
+          } catch (_) {
+            writeJson(res, 400, {
+              ok: false,
+              code: "invalid_request",
+              error: "Could not read the setup password payload.",
+            });
+            return;
+          }
 
-        const password = String(parsed.password || "");
-        if (!safeSecretCompare(password, SETUP_PASSWORD)) {
-          writeJson(res, 401, {
-            ok: false,
-            code: "invalid_password",
-            error: "Incorrect setup password.",
-          });
-          return;
-        }
+          const password = String(parsed.password || "");
+          if (!safeSecretCompare(password, SETUP_PASSWORD)) {
+            writeJson(res, 401, {
+              ok: false,
+              code: "invalid_password",
+              error: "Incorrect setup password.",
+            });
+            return;
+          }
 
-        const sessionId = createSetupSession();
-        writeJson(
-          res,
-          200,
-          { ok: true, setupAuth: { ...setupAuthState(req), authenticated: true } },
-          { "Set-Cookie": createSessionCookie(sessionId, Math.floor(SETUP_SESSION_TTL_MS / 1000)) }
-        );
+          const sessionId = createSetupSession();
+          writeJson(
+            res,
+            200,
+            { ok: true, setupAuth: { ...setupAuthState(req), authenticated: true } },
+            { "Set-Cookie": createSessionCookie(sessionId, Math.floor(SETUP_SESSION_TTL_MS / 1000)) }
+          );
+        } catch (err) {
+          console.error("Login error:", err);
+          writeJson(res, 500, { ok: false, error: "Internal server error during login." });
+        }
       })();
       return;
     }
