@@ -112,7 +112,7 @@ function createSessionCookie(value, maxAgeSeconds) {
 }
 
 function clearSessionCookie() {
-  return `${SETUP_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+  return `${SETUP_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
 }
 
 function safeSecretCompare(left, right) {
