@@ -39,6 +39,8 @@ const CODEX_HOME = process.env.CODEX_HOME || join(HOME, ".codex");
 const CODEX_CONFIG_PATH = join(CODEX_HOME, "config.toml");
 const CODEX_AUTH_PATH = join(CODEX_HOME, "auth.json");
 const CODEX_STATE_PATH = join(HOME, "codex-device-auth-state.json");
+const GWS_CONFIG_DIR = process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR || join(HOME, ".config", "gws");
+const LINEAR_STATE_PATH = join(HOME, "linear-mcp-state.json");
 const SETUP_PASSWORD = process.env.PAPERCLIP_SETUP_PASSWORD || "";
 const SETUP_SESSION_COOKIE = "paperclip_setup_session";
 const SETUP_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -64,6 +66,7 @@ function resolvePackageBin(packageName, preferredBinName = null) {
 
 const PAPERCLIP_BIN = resolvePackageBin("paperclipai");
 const CODEX_BIN = resolvePackageBin("@openai/codex", "codex");
+const GWS_BIN = resolvePackageBin("@googleworkspace/cli", "gws");
 
 // Strip ANSI escape sequences (colors, cursor, etc.) from strings
 function stripAnsi(str) {
@@ -152,6 +155,8 @@ let bootstrapSkippedReason = null;
 let codexLoginProc = null;
 let codexLoginStopReason = null;
 let codexState = defaultCodexState();
+let upgradeInProgress = false;
+let lastUpgradeResult = null;
 
 const setupSessions = new Map();
 
@@ -197,6 +202,18 @@ function ensureCodexHome() {
   }
   if (currentConfig !== desiredConfig) {
     writeFileSync(CODEX_CONFIG_PATH, desiredConfig);
+  }
+
+  // Restore auth.json from CODEX_AUTH_JSON env var if the file doesn't exist yet
+  const authJson = process.env.CODEX_AUTH_JSON || "";
+  if (authJson && !existsSync(CODEX_AUTH_PATH)) {
+    try {
+      JSON.parse(authJson); // validate
+      writeFileSync(CODEX_AUTH_PATH, authJson);
+      console.log(`   ✅ Codex auth.json restored from CODEX_AUTH_JSON env var.`);
+    } catch (err) {
+      console.error(`   ⚠️ CODEX_AUTH_JSON is not valid JSON — skipping auth.json restore.`);
+    }
   }
 }
 
@@ -690,6 +707,196 @@ async function startCodexDeviceLogin() {
   proc.on("exit", () => clearTimeout(loginTimeout));
 }
 
+// ── Google Workspace CLI helpers ──────────────────────────────────────────────
+
+function ensureGwsConfigDir() {
+  mkdirSync(GWS_CONFIG_DIR, { recursive: true });
+}
+
+function gwsEnv(extraEnv = {}) {
+  ensureGwsConfigDir();
+  return {
+    ...process.env,
+    GOOGLE_WORKSPACE_CLI_CONFIG_DIR: GWS_CONFIG_DIR,
+    GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND: "file",
+    ...extraEnv,
+  };
+}
+
+async function detectGwsAuthStatus() {
+  ensureGwsConfigDir();
+  const result = await runNodeBinAndCapture(GWS_BIN, ["auth", "status"], gwsEnv());
+  const combined = stripAnsi(`${result.stdout}\n${result.stderr}`.trim());
+  const authenticated =
+    (/Logged in|Authenticated|email:/i.test(combined)) &&
+    !/Not logged in|No credentials|not authenticated/i.test(combined);
+
+  return {
+    authenticated,
+    code: result.code,
+    output: combined,
+    error: result.error ? String(result.error) : null,
+  };
+}
+
+function gwsClientState(req) {
+  const auth = setupAuthState(req);
+  if (!auth.passwordConfigured) {
+    return {
+      available: false,
+      locked: false,
+      phase: "unavailable",
+      message: "Set PAPERCLIP_SETUP_PASSWORD to unlock Google Workspace CLI setup.",
+      error: null,
+    };
+  }
+  if (!auth.authenticated) {
+    return {
+      available: true,
+      locked: true,
+      phase: "locked",
+      message: "Unlock setup with PAPERCLIP_SETUP_PASSWORD to manage Google Workspace CLI.",
+      error: null,
+    };
+  }
+  return {
+    available: true,
+    locked: false,
+    phase: gwsAuthPhase,
+    message: gwsAuthMessage,
+    error: gwsAuthError,
+  };
+}
+
+let gwsAuthPhase = "idle";
+let gwsAuthMessage = "Google Workspace CLI is not configured.";
+let gwsAuthError = null;
+
+async function initializeGwsState() {
+  ensureGwsConfigDir();
+  const status = await detectGwsAuthStatus();
+  if (status.authenticated) {
+    gwsAuthPhase = "authenticated";
+    gwsAuthMessage = "Google Workspace CLI is authenticated.";
+    gwsAuthError = null;
+  }
+}
+
+// ── Linear MCP helpers ───────────────────────────────────────────────────────
+
+let linearMcpPhase = "idle";
+let linearMcpMessage = "Linear MCP is not configured.";
+let linearMcpError = null;
+
+function linearClientState(req) {
+  const auth = setupAuthState(req);
+  if (!auth.passwordConfigured) {
+    return {
+      available: false,
+      locked: false,
+      phase: "unavailable",
+      message: "Set PAPERCLIP_SETUP_PASSWORD to unlock Linear MCP setup.",
+      error: null,
+    };
+  }
+  if (!auth.authenticated) {
+    return {
+      available: true,
+      locked: true,
+      phase: "locked",
+      message: "Unlock setup with PAPERCLIP_SETUP_PASSWORD to manage Linear MCP.",
+      error: null,
+    };
+  }
+  return {
+    available: true,
+    locked: false,
+    phase: linearMcpPhase,
+    message: linearMcpMessage,
+    error: linearMcpError,
+  };
+}
+
+function persistLinearState() {
+  writeFileSync(LINEAR_STATE_PATH, JSON.stringify({
+    phase: linearMcpPhase,
+    message: linearMcpMessage,
+    error: linearMcpError,
+  }, null, 2));
+}
+
+function loadLinearState() {
+  if (!existsSync(LINEAR_STATE_PATH)) return;
+  try {
+    const saved = JSON.parse(readFileSync(LINEAR_STATE_PATH, "utf8"));
+    linearMcpPhase = saved.phase || "idle";
+    linearMcpMessage = saved.message || "Linear MCP is not configured.";
+    linearMcpError = saved.error || null;
+  } catch (_) {}
+}
+
+function writeCodexMcpConfig() {
+  ensureCodexHome();
+  const configPath = join(CODEX_HOME, "config.toml");
+  let existing = "";
+  if (existsSync(configPath)) {
+    try { existing = readFileSync(configPath, "utf8"); } catch (_) {}
+  }
+
+  // Parse existing TOML lines, preserve non-MCP settings
+  const lines = existing.split("\n");
+  const nonMcpLines = [];
+  let inMcpSection = false;
+  for (const line of lines) {
+    if (/^\[mcp_servers\b/.test(line.trim())) {
+      inMcpSection = true;
+      continue;
+    }
+    if (inMcpSection && /^\[/.test(line.trim())) {
+      inMcpSection = false;
+    }
+    if (!inMcpSection) {
+      nonMcpLines.push(line);
+    }
+  }
+
+  // Ensure features section has rmcp enabled
+  let content = nonMcpLines.join("\n").trim();
+  if (!/experimental_use_rmcp_client\s*=\s*true/.test(content)) {
+    if (/^\[features\]/m.test(content)) {
+      content = content.replace(/^\[features\]/m, "[features]\nexperimental_use_rmcp_client = true");
+    } else {
+      content += "\n\n[features]\nexperimental_use_rmcp_client = true";
+    }
+  }
+
+  // Add Linear MCP if API key is available
+  const linearApiKey = process.env.LINEAR_API_KEY || "";
+  if (linearApiKey) {
+    content += `\n\n[mcp_servers.linear]\nurl = "https://mcp.linear.app/mcp"\n`;
+  }
+
+  content = content.trim() + "\n";
+  writeFileSync(configPath, content);
+}
+
+function initializeLinearState() {
+  loadLinearState();
+  const linearApiKey = process.env.LINEAR_API_KEY || "";
+  if (linearApiKey && linearMcpPhase !== "connected") {
+    linearMcpPhase = "connected";
+    linearMcpMessage = "Linear MCP is connected via LINEAR_API_KEY environment variable.";
+    linearMcpError = null;
+    writeCodexMcpConfig();
+    persistLinearState();
+  } else if (!linearApiKey && linearMcpPhase === "connected") {
+    linearMcpPhase = "idle";
+    linearMcpMessage = "Linear MCP is not configured. Set LINEAR_API_KEY in Railway Variables.";
+    linearMcpError = null;
+    persistLinearState();
+  }
+}
+
 // ── Paperclip process ─────────────────────────────────────────────────────────
 
 function startPaperclip() {
@@ -707,6 +914,9 @@ function startPaperclip() {
       PAPERCLIP_CONFIG: CONFIG_PATH,
       PAPERCLIP_HOME: HOME,
       CODEX_HOME,
+      GOOGLE_WORKSPACE_CLI_CONFIG_DIR: GWS_CONFIG_DIR,
+      GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND: "file",
+      ...(process.env.LINEAR_API_KEY ? { LINEAR_API_KEY: process.env.LINEAR_API_KEY } : {}),
       PORT: String(PAPERCLIP_PORT),
       HOST: "127.0.0.1",
       NODE_ENV: process.env.NODE_ENV || "production",
@@ -845,7 +1055,9 @@ function envVarStatus() {
     { key: "PAPERCLIP_HOME", required: false, label: "Paperclip Home", example: "/paperclip" },
     { key: "PAPERCLIP_SETUP_PASSWORD", required: false, label: "Setup Password", example: "Required to unlock setup actions and Codex Plan login" },
     { key: "ANTHROPIC_API_KEY", required: false, label: "Anthropic API Key", example: "sk-ant-..." },
+    { key: "CODEX_AUTH_JSON", required: false, label: "Codex auth.json (inject)", example: "Paste output of: cat ~/.codex/auth.json" },
     { key: "OPENAI_API_KEY", required: false, label: "OpenAI API Key (usage-billed fallback)", example: "Only set this if you want API-billed fallback instead of Codex Plan OAuth" },
+    { key: "LINEAR_API_KEY", required: false, label: "Linear API Key", example: "lin_api_... — enables Linear MCP integration" },
   ];
   return all.map(v => ({
     ...v,
@@ -987,6 +1199,101 @@ function startServer() {
       return;
     }
 
+    // ── Google Workspace CLI routes ───────────────────────────────────────────
+
+    if (path === "/setup/gws/status" && method === "GET") {
+      writeJson(res, 200, gwsClientState(req));
+      return;
+    }
+
+    if (path === "/setup/gws/import-credentials" && method === "POST") {
+      if (!requireSetupAuth(req, res, { requirePasswordConfigured: true, purpose: "import Google Workspace credentials" })) {
+        return;
+      }
+
+      (async () => {
+        try {
+          let parsed = {};
+          try {
+            const bodyText = await readRequestBody(req);
+            parsed = bodyText ? JSON.parse(bodyText) : {};
+          } catch (_) {
+            writeJson(res, 400, { ok: false, error: "Could not read the credentials payload." });
+            return;
+          }
+
+          const credentials = parsed.credentials;
+          if (!credentials || typeof credentials !== "string") {
+            writeJson(res, 400, { ok: false, error: "Provide a 'credentials' field with the JSON content from gws auth export." });
+            return;
+          }
+
+          // Validate it's valid JSON
+          try {
+            JSON.parse(credentials);
+          } catch (_) {
+            writeJson(res, 400, { ok: false, error: "Invalid JSON in credentials field." });
+            return;
+          }
+
+          ensureGwsConfigDir();
+          const credPath = join(GWS_CONFIG_DIR, "credentials.json");
+          writeFileSync(credPath, credentials);
+
+          // Verify it works
+          const status = await detectGwsAuthStatus();
+          if (status.authenticated) {
+            gwsAuthPhase = "authenticated";
+            gwsAuthMessage = "Google Workspace CLI is authenticated.";
+            gwsAuthError = null;
+          } else {
+            gwsAuthPhase = "imported";
+            gwsAuthMessage = "Credentials imported. Auth status could not be verified — the credentials may need re-export.";
+            gwsAuthError = null;
+          }
+
+          writeJson(res, 200, { ok: true, state: gwsClientState(req) });
+        } catch (err) {
+          console.error("GWS import error:", err);
+          writeJson(res, 500, { ok: false, error: "Internal server error importing credentials." });
+        }
+      })();
+      return;
+    }
+
+    if (path === "/setup/gws/logout" && method === "POST") {
+      if (!requireSetupAuth(req, res, { requirePasswordConfigured: true, purpose: "remove Google Workspace credentials" })) {
+        return;
+      }
+
+      if (existsSync(GWS_CONFIG_DIR)) {
+        rmSync(GWS_CONFIG_DIR, { recursive: true, force: true });
+      }
+      ensureGwsConfigDir();
+      gwsAuthPhase = "idle";
+      gwsAuthMessage = "Google Workspace CLI is not configured.";
+      gwsAuthError = null;
+
+      writeJson(res, 200, { ok: true, state: gwsClientState(req) });
+      return;
+    }
+
+    // ── Linear MCP routes ────────────────────────────────────────────────────
+
+    if (path === "/setup/linear/status" && method === "GET") {
+      writeJson(res, 200, linearClientState(req));
+      return;
+    }
+
+    if (path === "/setup/linear/refresh" && method === "POST") {
+      if (!requireSetupAuth(req, res, { requirePasswordConfigured: true, purpose: "refresh Linear MCP status" })) {
+        return;
+      }
+      initializeLinearState();
+      writeJson(res, 200, { ok: true, state: linearClientState(req) });
+      return;
+    }
+
     if (path === "/setup/invite" && method === "GET") {
       if (!requireSetupAuth(req, res, { purpose: "view the bootstrap invite" })) {
         return;
@@ -1062,6 +1369,98 @@ function startServer() {
       return;
     }
 
+    if (path === "/setup/versions" && method === "GET") {
+      if (!requireSetupAuth(req, res, { purpose: "view package versions" })) {
+        return;
+      }
+
+      (async () => {
+        try {
+          const packages = [
+            "paperclipai",
+            "@anthropic-ai/claude-code",
+            "@openai/codex",
+            "@googleworkspace/cli",
+          ];
+          const versions = [];
+          for (const pkg of packages) {
+            try {
+              const pkgJsonPath = require.resolve(`${pkg}/package.json`);
+              const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+              versions.push({ name: pkg, version: pkgJson.version || "unknown" });
+            } catch (_) {
+              versions.push({ name: pkg, version: "not installed" });
+            }
+          }
+          writeJson(res, 200, {
+            packages: versions,
+            upgradeInProgress,
+            lastUpgradeResult,
+          });
+        } catch (err) {
+          console.error("Versions error:", err);
+          writeJson(res, 500, { ok: false, error: "Failed to read package versions." });
+        }
+      })();
+      return;
+    }
+
+    if (path === "/setup/upgrade" && method === "POST") {
+      if (!requireSetupAuth(req, res, { purpose: "upgrade packages" })) {
+        return;
+      }
+
+      if (upgradeInProgress) {
+        writeJson(res, 409, { ok: false, error: "An upgrade is already in progress." });
+        return;
+      }
+
+      upgradeInProgress = true;
+      lastUpgradeResult = null;
+      writeJson(res, 200, { ok: true, message: "Upgrade started. Check /setup/versions for progress." });
+
+      // Run npm update in background
+      const npmProc = spawn("npm", ["update", "--omit=dev"], {
+        cwd: join(__dirname, ".."),
+        stdio: ["ignore", "pipe", "pipe"],
+        env: process.env,
+      });
+
+      let upgradeOutput = "";
+      npmProc.stdout.on("data", (chunk) => {
+        upgradeOutput += chunk.toString();
+        process.stdout.write(chunk);
+      });
+      npmProc.stderr.on("data", (chunk) => {
+        upgradeOutput += chunk.toString();
+        process.stderr.write(chunk);
+      });
+      npmProc.on("exit", (code) => {
+        upgradeInProgress = false;
+        lastUpgradeResult = {
+          success: code === 0,
+          code,
+          output: upgradeOutput.slice(-2000),
+          completedAt: new Date().toISOString(),
+        };
+        if (code === 0) {
+          console.log("\n✅ Package upgrade completed successfully.\n");
+        } else {
+          console.error(`\n❌ Package upgrade failed with code ${code}.\n`);
+        }
+      });
+      npmProc.on("error", (err) => {
+        upgradeInProgress = false;
+        lastUpgradeResult = {
+          success: false,
+          code: null,
+          output: String(err),
+          completedAt: new Date().toISOString(),
+        };
+      });
+      return;
+    }
+
     if (path === "/setup/reset" && method === "POST") {
       if (!requireSetupAuth(req, res, { purpose: "reset setup" })) {
         return;
@@ -1104,6 +1503,8 @@ function startServer() {
 
 async function main() {
   await initializeCodexState();
+  await initializeGwsState();
+  initializeLinearState();
   loadInviteArtifactsFromDisk();
   startServer();
 }

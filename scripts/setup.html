@@ -331,6 +331,56 @@
         </div>
       </div>
 
+      <hr class="divider" />
+
+      <div class="section-label">Google Workspace CLI</div>
+
+      <div class="dashboard-box" id="gws-box">
+        <h3>📊 Connect Google Workspace CLI</h3>
+        <p id="gws-description">Loading...</p>
+
+        <div id="gws-status" class="banner info">
+          <span class="spinner"></span>
+          <span>Checking Google Workspace CLI status...</span>
+        </div>
+
+        <div id="gws-import-box" class="invite-box" style="display:none">
+          <h3>Import credentials from your local machine</h3>
+          <p style="font-size:14px;color:var(--muted);margin-bottom:12px;line-height:1.6;">
+            On your local machine, run <code>gws auth export --unmasked</code> and paste the full JSON output below.
+            This imports your authenticated session into the Railway service.
+          </p>
+          <textarea class="text-input" id="gws-credentials-input" rows="6" placeholder='Paste the output of: gws auth export --unmasked' style="width:100%;font-family:monospace;font-size:13px;resize:vertical;"></textarea>
+          <div class="actions" style="margin-top:12px;">
+            <button class="btn btn-primary" id="gws-import-btn" onclick="importGwsCredentials(this)">📥 Import credentials</button>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-primary" id="gws-connect-btn" onclick="toggleGwsImport()" style="display:none">🔑 Import GWS credentials</button>
+          <button class="btn btn-ghost" id="gws-logout-btn" style="display:none" onclick="logoutGws(this)">🚪 Remove saved GWS login</button>
+          <button class="btn btn-secondary" onclick="loadGwsStatus()">🔄 Refresh GWS status</button>
+        </div>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="section-label">Linear MCP</div>
+
+      <div class="dashboard-box" id="linear-box">
+        <h3>📋 Connect Linear for issue tracking</h3>
+        <p id="linear-description">Loading...</p>
+
+        <div id="linear-status" class="banner info">
+          <span class="spinner"></span>
+          <span>Checking Linear MCP status...</span>
+        </div>
+
+        <div class="actions">
+          <button class="btn btn-secondary" onclick="loadLinearStatus()">🔄 Refresh Linear status</button>
+        </div>
+      </div>
+
     </div>
 
     <!-- ══════════════════════════════════════════════
@@ -393,6 +443,25 @@
       <div class="section-label">Status</div>
       <div id="manage-status" class="banner info">
         <span class="spinner"></span><span>Loading...</span>
+      </div>
+
+      <hr class="divider" />
+
+      <!-- Package versions -->
+      <div class="section-label">Package versions</div>
+      <div class="dashboard-box" id="versions-box">
+        <h3>📦 Installed packages</h3>
+        <p style="font-size:14px;color:var(--muted);margin-bottom:14px;line-height:1.6;">
+          All dependencies use <code>"latest"</code> in package.json. Click <strong>Upgrade</strong> to run <code>npm update</code> and pull the newest versions without redeploying.
+        </p>
+        <div id="versions-list" class="var-list" style="margin-bottom:14px;">
+          <div class="banner info"><span class="spinner"></span><span>Loading versions...</span></div>
+        </div>
+        <div id="upgrade-result" style="display:none;margin-bottom:14px;"></div>
+        <div class="actions">
+          <button class="btn btn-primary" id="upgrade-btn" onclick="upgradePackages(this)">⬆️ Upgrade all packages</button>
+          <button class="btn btn-secondary" onclick="loadVersions()">🔄 Refresh versions</button>
+        </div>
       </div>
 
       <!-- Reset -->
@@ -696,6 +765,8 @@
       adminExists.style.display = 'none';
       startInvitePoll();
     }
+
+    await loadVersions();
   }
 
   function allVarsSet() {
@@ -814,6 +885,8 @@
       input.value = '';
       await loadStatus();
       await loadCodexStatus();
+      await loadGwsStatus();
+      await loadLinearStatus();
       if (document.getElementById('panel-manage').classList.contains('active')) {
         await refreshManage();
       }
@@ -836,6 +909,8 @@
       stopCodexPoll();
       await loadStatus();
       await loadCodexStatus();
+      await loadGwsStatus();
+      await loadLinearStatus();
       if (document.getElementById('panel-manage').classList.contains('active')) {
         await refreshManage();
       }
@@ -900,7 +975,7 @@
       return;
     }
 
-    description.innerHTML = 'Use your ChatGPT/Codex Plan via OAuth. This avoids separate OpenAI API billing unless you deliberately set <code>OPENAI_API_KEY</code> as a fallback.';
+    description.innerHTML = 'Use your ChatGPT/Codex Plan via OAuth. This avoids separate OpenAI API billing unless you deliberately set <code>OPENAI_API_KEY</code> as a fallback.<br><br>💡 <strong>Alternative:</strong> If device login fails, run <code>cat ~/.codex/auth.json</code> locally and paste the output into the <code>CODEX_AUTH_JSON</code> Railway variable. The session will be restored on next deploy.';
     startBtn.disabled = false;
 
     if (data.phase === 'authenticated') {
@@ -1012,6 +1087,240 @@
     }
   }
 
+  // ── Google Workspace CLI ────────────────────────────────────────────────────
+
+  function renderGwsState(data) {
+    const description = document.getElementById('gws-description');
+    const banner = document.getElementById('gws-status');
+    const importBox = document.getElementById('gws-import-box');
+    const connectBtn = document.getElementById('gws-connect-btn');
+    const logoutBtn = document.getElementById('gws-logout-btn');
+
+    if (!setupAuth.passwordConfigured) {
+      description.innerHTML = 'To use the Google Workspace CLI, add <code>PAPERCLIP_SETUP_PASSWORD</code> first.';
+      banner.className = 'banner warn';
+      banner.textContent = '⚠️ Google Workspace CLI setup is disabled until PAPERCLIP_SETUP_PASSWORD is set.';
+      importBox.style.display = 'none';
+      connectBtn.style.display = 'none';
+      logoutBtn.style.display = 'none';
+      return;
+    }
+
+    if (setupAuth.required && !setupAuth.authenticated) {
+      description.innerHTML = 'Unlock setup first, then import your Google Workspace credentials.';
+      banner.className = 'banner info';
+      banner.textContent = '🔒 Unlock setup to manage Google Workspace CLI.';
+      importBox.style.display = 'none';
+      connectBtn.style.display = 'none';
+      logoutBtn.style.display = 'none';
+      return;
+    }
+
+    description.innerHTML = 'Connect the Google Workspace CLI (<code>gws</code>) to access Drive, Gmail, Calendar, Sheets, and more. Run <code>gws auth login</code> locally, then export and import your credentials here.';
+
+    if (data.phase === 'authenticated' || data.phase === 'imported') {
+      banner.className = 'banner success';
+      banner.textContent = data.message || '✅ Google Workspace CLI is connected.';
+      importBox.style.display = 'none';
+      connectBtn.style.display = 'none';
+      logoutBtn.style.display = 'inline-flex';
+      return;
+    }
+
+    banner.className = 'banner info';
+    banner.textContent = data.message || 'Google Workspace CLI is not configured.';
+    importBox.style.display = 'none';
+    connectBtn.style.display = 'inline-flex';
+    logoutBtn.style.display = 'none';
+  }
+
+  async function loadGwsStatus() {
+    try {
+      if (!setupAuth.passwordConfigured || (setupAuth.required && !setupAuth.authenticated)) {
+        renderGwsState({ phase: 'locked', message: 'Unlock setup to manage Google Workspace CLI.' });
+        return;
+      }
+      const data = await apiJson('/setup/gws/status');
+      renderGwsState(data);
+    } catch (error) {
+      document.getElementById('gws-status').className = 'banner error';
+      document.getElementById('gws-status').textContent = `❌ ${await normalizeApiError(error)}`;
+    }
+  }
+
+  function toggleGwsImport() {
+    const box = document.getElementById('gws-import-box');
+    box.style.display = box.style.display === 'none' ? 'block' : 'none';
+  }
+
+  async function importGwsCredentials(btn) {
+    const textarea = document.getElementById('gws-credentials-input');
+    const credentials = textarea.value.trim();
+    if (!credentials) {
+      textarea.focus();
+      return;
+    }
+
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '⏳ Importing...';
+
+    try {
+      await apiJson('/setup/gws/import-credentials', {
+        method: 'POST',
+        body: JSON.stringify({ credentials }),
+      });
+      textarea.value = '';
+      document.getElementById('gws-import-box').style.display = 'none';
+      await loadGwsStatus();
+    } catch (error) {
+      alert(await normalizeApiError(error));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  async function logoutGws(btn) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '⏳ Removing...';
+
+    try {
+      await apiJson('/setup/gws/logout', { method: 'POST' });
+      await loadGwsStatus();
+    } catch (error) {
+      alert(await normalizeApiError(error));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  // ── Package versions & upgrade ─────────────────────────────────────────────
+
+  async function loadVersions() {
+    const container = document.getElementById('versions-list');
+    const resultDiv = document.getElementById('upgrade-result');
+
+    if (setupAuth.required && !setupAuth.authenticated) {
+      container.innerHTML = '<div class="banner warn">🔒 Unlock setup to view package versions.</div>';
+      return;
+    }
+
+    try {
+      const data = await apiJson('/setup/versions');
+      container.innerHTML = data.packages.map(p =>
+        `<div class="var-row ok">
+          <div class="var-key">${p.name}</div>
+          <div class="var-hint">${p.version}</div>
+          <div class="var-badge ok">✓ Installed</div>
+        </div>`
+      ).join('');
+
+      const upgradeBtn = document.getElementById('upgrade-btn');
+      if (data.upgradeInProgress) {
+        upgradeBtn.disabled = true;
+        upgradeBtn.textContent = '⏳ Upgrading...';
+      } else {
+        upgradeBtn.disabled = false;
+        upgradeBtn.textContent = '⬆️ Upgrade all packages';
+      }
+
+      if (data.lastUpgradeResult) {
+        resultDiv.style.display = 'block';
+        if (data.lastUpgradeResult.success) {
+          resultDiv.innerHTML = `<div class="banner success">✅ Last upgrade completed at ${new Date(data.lastUpgradeResult.completedAt).toLocaleString()}</div>`;
+        } else {
+          resultDiv.innerHTML = `<div class="banner error">❌ Last upgrade failed (code ${data.lastUpgradeResult.code}) at ${new Date(data.lastUpgradeResult.completedAt).toLocaleString()}</div>`;
+        }
+      } else {
+        resultDiv.style.display = 'none';
+      }
+    } catch (error) {
+      container.innerHTML = `<div class="banner error">❌ ${await normalizeApiError(error)}</div>`;
+    }
+  }
+
+  async function upgradePackages(btn) {
+    if (!confirm('Upgrade all npm packages to latest versions? This runs npm update in the background.')) return;
+
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = '⏳ Starting upgrade...';
+
+    try {
+      await apiJson('/setup/upgrade', { method: 'POST' });
+      btn.textContent = '⏳ Upgrading...';
+      // Poll for completion
+      const poll = setInterval(async () => {
+        await loadVersions();
+        const data = await apiJson('/setup/versions');
+        if (!data.upgradeInProgress) {
+          clearInterval(poll);
+          btn.disabled = false;
+          btn.textContent = original;
+        }
+      }, 3000);
+    } catch (error) {
+      alert(await normalizeApiError(error));
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  }
+
+  // ── Linear MCP ─────────────────────────────────────────────────────────────
+
+  function renderLinearState(data) {
+    const description = document.getElementById('linear-description');
+    const banner = document.getElementById('linear-status');
+
+    if (!setupAuth.passwordConfigured) {
+      description.innerHTML = 'To use Linear MCP, add <code>PAPERCLIP_SETUP_PASSWORD</code> first.';
+      banner.className = 'banner warn';
+      banner.textContent = '⚠️ Linear MCP setup is disabled until PAPERCLIP_SETUP_PASSWORD is set.';
+      return;
+    }
+
+    if (setupAuth.required && !setupAuth.authenticated) {
+      description.innerHTML = 'Unlock setup first to view Linear MCP status.';
+      banner.className = 'banner info';
+      banner.textContent = '🔒 Unlock setup to manage Linear MCP.';
+      return;
+    }
+
+    description.innerHTML = 'Connect Linear via its official MCP server. Add <code>LINEAR_API_KEY</code> in Railway Variables (get one from <a href="https://linear.app/settings/api" target="_blank" style="color:var(--accent)">Linear Developer Settings</a>), then click Refresh.';
+
+    if (data.phase === 'connected') {
+      banner.className = 'banner success';
+      banner.textContent = data.message || '✅ Linear MCP is connected.';
+      return;
+    }
+
+    if (data.phase === 'error') {
+      banner.className = 'banner error';
+      banner.textContent = data.error ? `❌ ${data.error}` : '❌ Linear MCP connection failed.';
+      return;
+    }
+
+    banner.className = 'banner info';
+    banner.textContent = data.message || 'Linear MCP is not configured. Add LINEAR_API_KEY in Railway Variables.';
+  }
+
+  async function loadLinearStatus() {
+    try {
+      if (!setupAuth.passwordConfigured || (setupAuth.required && !setupAuth.authenticated)) {
+        renderLinearState({ phase: 'locked', message: 'Unlock setup to manage Linear MCP.' });
+        return;
+      }
+      const data = await apiJson('/setup/linear/status');
+      renderLinearState(data);
+    } catch (error) {
+      document.getElementById('linear-status').className = 'banner error';
+      document.getElementById('linear-status').textContent = `❌ ${await normalizeApiError(error)}`;
+    }
+  }
+
   // ── Reset ──────────────────────────────────────────────────────────────────
   function stopInvitePoll() {
     if (invitePoll) {
@@ -1032,6 +1341,8 @@
       showTab('setup');
       await loadStatus();
       await loadCodexStatus();
+      await loadGwsStatus();
+      await loadLinearStatus();
     } catch(e) {
       alert(await normalizeApiError(e));
     }
@@ -1041,6 +1352,8 @@
   async function initializePage() {
     await loadStatus();
     await loadCodexStatus();
+    await loadGwsStatus();
+    await loadLinearStatus();
   }
 
   initializePage();

@@ -1,7 +1,7 @@
 FROM node:20-slim
 
-# Install gosu for privilege dropping in entrypoint
-RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
+# Install gosu for privilege dropping and curl for gws binary download
+RUN apt-get update && apt-get install -y --no-install-recommends gosu curl && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user (required: Claude CLI refuses --dangerously-skip-permissions as root)
 RUN groupadd -r paperclip && useradd -r -g paperclip -m -d /home/paperclip -s /bin/bash paperclip
@@ -24,6 +24,9 @@ RUN chown -R paperclip:paperclip /app /home/paperclip
 # Copy and set up entrypoint (fixes volume mount ownership at runtime)
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Google Workspace CLI: use file-based keyring (no desktop DBUS in Docker)
+ENV GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
 
 # Railway injects PORT at runtime (default 3100)
 ENV PORT=3100
